@@ -1,23 +1,11 @@
-// Copyright 2021 The Outline Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 import {DigitalOceanAccount} from './digitalocean_account';
 import {GcpAccount} from './gcp_account';
+import {YandexAccount} from './yandex_account';
 import {ShadowboxSettings} from './server_install';
 import * as accounts from '../model/accounts';
 import * as digitalocean from '../model/digitalocean';
 import * as gcp from '../model/gcp';
+import * as yandex from '../model/yandex';
 
 type DigitalOceanAccountJson = {
   accessToken: string;
@@ -27,6 +15,10 @@ type GcpAccountJson = {
   refreshToken: string;
 };
 
+type YandexAccountJson = {
+  accessToken: string;
+};
+
 /**
  * Manages connected cloud provider accounts.
  */
@@ -34,9 +26,11 @@ export class CloudAccounts implements accounts.CloudAccounts {
   private readonly LEGACY_DIGITALOCEAN_STORAGE_KEY = 'LastDOToken';
   private readonly DIGITALOCEAN_ACCOUNT_STORAGE_KEY = 'accounts.digitalocean';
   private readonly GCP_ACCOUNT_STORAGE_KEY = 'accounts.gcp';
+  private readonly YANDEX_ACCOUNT_STORAGE_KEY = 'accounts.yandex';
 
   private digitalOceanAccount: DigitalOceanAccount = null;
   private gcpAccount: GcpAccount = null;
+  private yandexAccount: YandexAccount = null;
 
   constructor(
     private shadowboxSettings: ShadowboxSettings,
@@ -60,6 +54,13 @@ export class CloudAccounts implements accounts.CloudAccounts {
     return this.gcpAccount;
   }
 
+  /** See {@link CloudAccounts#connectYandexAccount} */
+  connectYandexAccount(accessToken: string): yandex.Account {
+    this.yandexAccount = this.createYandexAccount(accessToken);
+    this.save();
+    return this.yandexAccount;
+  }
+
   /** See {@link CloudAccounts#disconnectDigitalOceanAccount} */
   disconnectDigitalOceanAccount(): void {
     // TODO(fortuna): Revoke access token.
@@ -74,6 +75,13 @@ export class CloudAccounts implements accounts.CloudAccounts {
     this.save();
   }
 
+  /** See {@link CloudAccounts#disconnectYandexAccount} */
+  disconnectYandexAccount(): void {
+    // TODO: Revoke access token.
+    this.yandexAccount = null;
+    this.save();
+  }
+
   /** See {@link CloudAccounts#getDigitalOceanAccount} */
   getDigitalOceanAccount(): digitalocean.Account {
     return this.digitalOceanAccount;
@@ -82,6 +90,11 @@ export class CloudAccounts implements accounts.CloudAccounts {
   /** See {@link CloudAccounts#getGcpAccount} */
   getGcpAccount(): gcp.Account {
     return this.gcpAccount;
+  }
+
+  /** See {@link CloudAccounts#getYandexAccount} */
+  getYandexAccount(): yandex.Account {
+    return this.yandexAccount;
   }
 
   /** Loads the saved cloud accounts from disk. */
@@ -114,6 +127,18 @@ export class CloudAccounts implements accounts.CloudAccounts {
       );
       this.gcpAccount = this.createGcpAccount(gcpAccountJson.refreshToken);
     }
+
+    const yandexAccountJsonString = this.storage.getItem(
+      this.YANDEX_ACCOUNT_STORAGE_KEY
+    );
+    if (yandexAccountJsonString) {
+      const yandexAccountJson: YandexAccountJson = JSON.parse(
+        this.storage.getItem(this.YANDEX_ACCOUNT_STORAGE_KEY)
+      );
+      this.yandexAccount = this.createYandexAccount(
+        yandexAccountJson.accessToken
+      );
+    }
   }
 
   /** Loads legacy DigitalOcean access token. */
@@ -143,6 +168,10 @@ export class CloudAccounts implements accounts.CloudAccounts {
     return new GcpAccount('gcp', refreshToken, this.shadowboxSettings);
   }
 
+  private createYandexAccount(accessToken: string): YandexAccount {
+    return new YandexAccount('yandex', accessToken, this.shadowboxSettings);
+  }
+
   private save(): void {
     if (this.digitalOceanAccount) {
       const accessToken = this.digitalOceanAccount.getAccessToken();
@@ -165,6 +194,16 @@ export class CloudAccounts implements accounts.CloudAccounts {
       );
     } else {
       this.storage.removeItem(this.GCP_ACCOUNT_STORAGE_KEY);
+    }
+    if (this.yandexAccount) {
+      const accessToken = this.yandexAccount.getAccessToken();
+      const yandexAccountJson: YandexAccountJson = {accessToken};
+      this.storage.setItem(
+        this.YANDEX_ACCOUNT_STORAGE_KEY,
+        JSON.stringify(yandexAccountJson)
+      );
+    } else {
+      this.storage.removeItem(this.YANDEX_ACCOUNT_STORAGE_KEY);
     }
   }
 }

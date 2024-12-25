@@ -1,17 +1,3 @@
-// Copyright 2018 The Outline Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 import {CustomError} from '@outline/infrastructure/custom_error';
 import * as path_api from '@outline/infrastructure/path_api';
 import {sleep} from '@outline/infrastructure/sleep';
@@ -32,6 +18,7 @@ import {HttpError} from '../cloud/gcp_api';
 import * as accounts from '../model/accounts';
 import * as digitalocean from '../model/digitalocean';
 import * as gcp from '../model/gcp';
+import * as yandex from '../model/yandex';
 import type {CloudLocation} from '../model/location';
 import * as server_model from '../model/server';
 
@@ -148,6 +135,7 @@ class UnreachableServerError extends CustomError {
 export class App {
   private digitalOceanAccount: digitalocean.Account;
   private gcpAccount: gcp.Account;
+  private yandexAccount: yandex.Account;
   private selectedServer: server_model.Server;
   private idServerMap = new Map<string, server_model.Server>();
 
@@ -193,6 +181,21 @@ export class App {
       this.showServer(server);
     });
     appRoot.addEventListener(
+      'ConnectYandexAccountRequested',
+      async (_: CustomEvent) => this.handleConnectYandexAccountRequest()
+    );
+    appRoot.addEventListener(
+      'CreateYandexServerRequested',
+      async (_: CustomEvent) => {
+        this.appRoot.getAndShowYandexCreateServerApp().start(this.yandexAccount);
+      }
+    );
+    appRoot.addEventListener('YandexServerCreated', (event: CustomEvent) => {
+      const {server} = event.detail;
+      this.addServer(this.yandexAccount.getId(), server);
+      this.showServer(server);
+    });
+    appRoot.addEventListener(
       'DigitalOceanSignOutRequested',
       (_: CustomEvent) => {
         this.disconnectDigitalOceanAccount();
@@ -203,12 +206,28 @@ export class App {
       this.disconnectGcpAccount();
       this.showIntro();
     });
+    appRoot.addEventListener('YandexSignOutRequested', (_: CustomEvent) => {
+      this.disconnectYandexAccount();
+      this.showIntro();
+    });
 
     appRoot.addEventListener(
       'SetUpDigitalOceanServerRequested',
       (event: CustomEvent) => {
         this.createDigitalOceanServer(
           event.detail.region,
+          event.detail.metricsEnabled
+        );
+      }
+    );
+
+    appRoot.addEventListener(
+      'SetUpYandexServerRequested',
+      (event: CustomEvent) => {
+        this.createYandexServer(
+          event.detail.projectId,
+          event.detail.name,
+          event.detail.zone,
           event.detail.metricsEnabled
         );
       }
@@ -419,6 +438,7 @@ export class App {
     await Promise.all([
       this.loadDigitalOceanAccount(this.cloudAccounts.getDigitalOceanAccount()),
       this.loadGcpAccount(this.cloudAccounts.getGcpAccount()),
+      this.loadYandexAccount(this.cloudAccounts.getYandexAccount()),
       this.loadManualServers(),
     ]);
 
@@ -504,6 +524,45 @@ export class App {
           // servers, and the GCP server creation flow will check and correct
           // the billing account setup.
           console.warn(`Ignoring HTTP 403 for GCP project "${gcpProject.id}"`);
+        } else {
+          throw e;
+        }
+      }
+    }
+    return result;
+  }
+
+  private async loadYandexAccount(
+    yandexAccount: yandex.Account
+  ): Promise<server_model.ManagedServer[]> {
+    if (!yandexAccount) {
+      return [];
+    }
+
+    this.yandexAccount = yandexAccount;
+    this.appRoot.yandexAccount = {
+      id: this.yandexAccount.getId(),
+      name: await this.yandexAccount.getName(),
+    };
+
+    const result = [];
+    const yandexProjects = await this.yandexAccount.listProjects();
+    for (const yandexProject of yandexProjects) {
+      try {
+        const servers = await this.yandexAccount.listServers(yandexProject.id);
+        for (const server of servers) {
+          this.addServer(this.yandexAccount.getId(), server);
+          result.push(server);
+        }
+      } catch (e) {
+        if (e instanceof HttpError && e.getStatusCode() === 403) {
+          // listServers() throws an HTTP 403 if the outline project has been
+          // created but the billing account has been removed, which can
+          // easily happen after the free trial period expires.  This is
+          // harmless, because a project with no billing cannot contain any
+          // servers, and the Yandex server creation flow will check and correct
+          // the billing account setup.
+          console.warn(`Ignoring HTTP 403 for Yandex project "${yandexProject.id}"`);
         } else {
           throw e;
         }
@@ -735,6 +794,27 @@ export class App {
     }
   }
 
+  // Runs the Yandex OAuth flow and returns the API access token.
+  // Throws CANCELLED_ERROR on cancellation, or the error in case of failure.
+  private async runYandexOauthFlow(): Promise<string> {
+    const oauth = runYandexOauth();
+    const handleOauthFlowCancelled = () => {
+      oauth.cancel();
+      this.disconnectYandexAccount();
+      this.showIntro();
+    };
+    this.appRoot.getAndShowYandexOauthFlow(handleOauthFlowCancelled);
+    try {
+      return await oauth.result;
+    } catch (error) {
+      if (oauth.isCancelled()) {
+        throw CANCELLED_ERROR;
+      } else {
+        throw error;
+      }
+    }
+  }
+
   private async handleConnectDigitalOceanAccountRequest(): Promise<void> {
     let digitalOceanAccount: digitalocean.Account = null;
     try {
@@ -786,6 +866,31 @@ export class App {
     }
   }
 
+  private async handleConnectYandexAccountRequest(): Promise<void> {
+    let yandexAccount: yandex.Account = null;
+    try {
+      const accessToken = await this.runYandexOauthFlow();
+      bringToFront();
+      yandexAccount = this.cloudAccounts.connectYandexAccount(accessToken);
+    } catch (error) {
+      this.disconnectYandexAccount();
+      this.showIntro();
+      bringToFront();
+      if (error !== CANCELLED_ERROR) {
+        console.error(`Yandex authentication failed: ${error}`);
+        this.appRoot.showError(this.appRoot.localize('error-yandex-auth'));
+      }
+      return;
+    }
+
+    const yandexServers = await this.loadYandexAccount(yandexAccount);
+    if (yandexServers.length > 0) {
+      this.showServer(yandexServers[0]);
+    } else {
+      this.appRoot.getAndShowYandexCreateServerApp().start(this.yandexAccount);
+    }
+  }
+
   // Clears the DigitalOcean credentials and returns to the intro screen.
   private disconnectDigitalOceanAccount(): void {
     if (!this.digitalOceanAccount) {
@@ -818,6 +923,23 @@ export class App {
       }
     }
     this.appRoot.gcpAccount = null;
+  }
+
+  // Clears the Yandex credentials and returns to the intro screen.
+  private disconnectYandexAccount(): void {
+    if (!this.yandexAccount) {
+      // Not connected.
+      return;
+    }
+    const accountId = this.yandexAccount.getId();
+    this.cloudAccounts.disconnectYandexAccount();
+    this.yandexAccount = null;
+    for (const serverEntry of this.appRoot.serverList) {
+      if (serverEntry.accountId === accountId) {
+        this.removeServer(serverEntry.id);
+      }
+    }
+    this.appRoot.yandexAccount = null;
   }
 
   // Opens the screen to create a server.
@@ -880,6 +1002,27 @@ export class App {
       this.showServer(server);
     } catch (error) {
       console.error('Error from createDigitalOceanServer', error);
+      this.appRoot.showError(this.appRoot.localize('error-server-creation'));
+    }
+  }
+
+  private async createYandexServer(
+    projectId: string,
+    name: string,
+    zone: yandex.Zone,
+    metricsEnabled: boolean
+  ): Promise<void> {
+    try {
+      const server = await this.yandexAccount.createServer(
+        projectId,
+        name,
+        zone,
+        metricsEnabled
+      );
+      this.addServer(this.yandexAccount.getId(), server);
+      this.showServer(server);
+    } catch (error) {
+      console.error('Error from createYandexServer', error);
       this.appRoot.showError(this.appRoot.localize('error-server-creation'));
     }
   }
