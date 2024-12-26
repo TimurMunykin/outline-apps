@@ -19,7 +19,6 @@ import * as accounts from '../model/accounts';
 import * as digitalocean from '../model/digitalocean';
 import * as gcp from '../model/gcp';
 import * as yandex from '../model/yandex';
-import {YandexAccount, YandexServer} from '../model/yandex';
 import type {CloudLocation} from '../model/location';
 import * as server_model from '../model/server';
 
