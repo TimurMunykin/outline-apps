@@ -139,3 +139,5 @@ export function runOauth(): OauthSession {
     },
   };
 }
+
+export { runOauth as runYandexOauth };
